@@ -29,6 +29,7 @@ import time as time_module
 from pathlib import Path
 from dotenv import load_dotenv
 from config import TELEGRAM_TOKEN, CAPTCHA_API_KEY, ERP_URL
+from keep_alive import keep_alive
 
 # Load environment variables
 load_dotenv()
@@ -700,6 +701,9 @@ class ERPBot:
             user_logger.info(f"{update.effective_user.id} - Sent {data_type} attendance data")
 
 if __name__ == "__main__":
+    # Start the keep_alive server
+    keep_alive()
+    
     bot = ERPBot(TELEGRAM_TOKEN, CAPTCHA_API_KEY, ERP_URL)
     
     # Set up and run the event loop
@@ -712,7 +716,7 @@ if __name__ == "__main__":
     finally:
         loop.close()
 
-# Test 2captcha balance
-solver = TwoCaptcha('dfe25dfb57892e1f51ba087c3a92fcba')
-balance = solver.balance()
-print(f"2captcha balance: {balance}") 
+    # Test 2captcha balance
+    solver = TwoCaptcha(CAPTCHA_API_KEY)
+    balance = solver.balance()
+    print(f"2captcha balance: {balance}")

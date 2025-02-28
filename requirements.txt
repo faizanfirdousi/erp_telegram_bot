@@ -5,4 +5,5 @@ cryptography==41.0.3
 python-dotenv==1.0.0
 2captcha-python==1.2.0
 APScheduler==3.10.4
-asyncio==3.4.3 
+asyncio==3.4.3
+flask==2.0.1 
