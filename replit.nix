@@ -1,4 +1,4 @@
-{
+{ pkgs }: {
   description = "Python environment for Telegram bot";
   deps = [
     pkgs.python39
