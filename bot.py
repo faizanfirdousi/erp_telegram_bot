@@ -22,6 +22,8 @@ from selenium.common.exceptions import (
     ElementNotInteractableException,
     StaleElementReferenceException
 )
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 import logging
 
 # Set up logging
@@ -157,33 +159,45 @@ class ERPBot:
         
         try:
             print(f"Attempting login with username: {user_data[user_id]['username']}")
-            screenshot_data = await self.check_attendance(user_id)
+            all_attendance_data = await self.check_attendance(user_id)
             
-            if screenshot_data and len(screenshot_data) > 0:
-                # Save the screenshot temporarily
-                temp_file = f"temp_attendance_{user_id}.png"
-                with open(temp_file, "wb") as f:
-                    f.write(screenshot_data)
+            if all_attendance_data and len(all_attendance_data) > 0:
+                message = "📊 Your Attendance Report\n\n"
                 
-                # Send the file
-                try:
-                    with open(temp_file, "rb") as f:
-                        await update.message.reply_document(
-                            document=f,
-                            filename=f"attendance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
-                            caption="Here's your attendance update!"
-                        )
-                finally:
-                    # Clean up temp file
-                    if os.path.exists(temp_file):
-                        os.remove(temp_file)
+                for attendance_type, subjects in all_attendance_data.items():
+                    if subjects:  # Only show sections that have data
+                        message += f"━━━ {attendance_type} Classes ━━━\n\n"
+                        
+                        for subject in subjects:
+                            try:
+                                # Clean up percentage string and handle empty or invalid values
+                                percentage_str = subject['percentage'].replace('%', '').strip()
+                                percentage = float(percentage_str) if percentage_str else 0
+                                emoji = "🟢" if percentage >= 75 else "🔴"
+                            except (ValueError, TypeError):
+                                # If percentage can't be converted to float, default to red emoji
+                                emoji = "🔴"
+                                
+                            message += f"{emoji} {subject['subject']}\n"
+                            message += f"├─ Present: {subject['present']}/{subject['total_lectures']}\n"
+                            message += f"├─ Absent: {subject['absent']}\n"
+                            message += f"└─ Attendance: {subject['percentage']}\n\n"
+                
+                # Split message if it's too long for Telegram
+                if len(message) > 4096:
+                    messages = [message[i:i+4096] for i in range(0, len(message), 4096)]
+                    for msg in messages:
+                        await update.message.reply_text(msg)
+                else:
+                    await update.message.reply_text(message)
             else:
                 await update.message.reply_text(
-                    "Sorry, I couldn't fetch your attendance. The screenshot was empty."
+                    "Sorry, I couldn't fetch your attendance data. Please try again later."
                 )
         except Exception as e:
+            logger.error(f"Error in attendance command: {str(e)}")  # Add better logging
             await update.message.reply_text(
-                f"Error fetching attendance: {str(e)}"
+                "Sorry, there was an error fetching your attendance. Please try again later."
             )
 
     async def check_attendance(self, user_id):
@@ -191,7 +205,10 @@ class ERPBot:
         driver = None
         try:
             logger.info("Starting attendance check process")
-            driver = webdriver.Chrome(options=self.chrome_options)
+            # Use webdriver_manager to get the correct ChromeDriver
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=self.chrome_options)
+            driver.maximize_window()  # Maximize window to ensure all elements are visible
             
             # Navigate to login page
             logger.info("Navigating to login page")
@@ -243,90 +260,116 @@ class ERPBot:
                 driver.execute_script("arguments[0].click();", login_button)
                 logger.info("Login button clicked")
                 
+                # Wait for login to complete and dashboard to load
+                await asyncio.sleep(5)  # Give more time for the page to load
+                
             except Exception as e:
                 logger.error(f"Captcha solving failed: {str(e)}")
                 raise
+
+            # Dictionary to store all attendance data
+            all_attendance_data = {}
             
-            # Wait for attendance table with a longer timeout
-            logger.info("Waiting for attendance table")
+            # Function to extract data from a table
+            def extract_table_data(table_id, attendance_type):
+                try:
+                    # Wait for table to be both present and visible
+                    table = WebDriverWait(driver, 30).until(
+                        EC.visibility_of_element_located((By.ID, table_id))
+                    )
+                    
+                    # Ensure table has loaded with data
+                    WebDriverWait(driver, 10).until(
+                        lambda d: len(d.find_elements(By.TAG_NAME, "tr")) > 1
+                    )
+                    
+                    attendance_data = []
+                    rows = table.find_elements(By.TAG_NAME, "tr")
+                    
+                    # Skip header row
+                    for row in rows[1:]:
+                        try:
+                            cells = row.find_elements(By.TAG_NAME, "td")
+                            if len(cells) >= 6:  # We expect 6 columns
+                                # Verify that we have actual data
+                                subject = cells[1].text.strip()
+                                total = cells[2].text.strip()
+                                present = cells[3].text.strip()
+                                absent = cells[4].text.strip()
+                                percentage = cells[5].text.strip()
+                                
+                                # Only add if we have valid data
+                                if subject and total and present and absent and percentage:
+                                    attendance_data.append({
+                                        "subject": subject,
+                                        "total_lectures": total,
+                                        "present": present,
+                                        "absent": absent,
+                                        "percentage": percentage
+                                    })
+                        except Exception as e:
+                            logger.error(f"Error extracting row data: {str(e)}")
+                            continue
+                    
+                    return attendance_data
+                except Exception as e:
+                    logger.error(f"Error finding {attendance_type} table: {str(e)}")
+                    return []
+
+            # Wait for the attendance section to be visible
             try:
-                attendance_table = WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ctl03_grdTHERORY"))
+                attendance_section = WebDriverWait(driver, 30).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "attendanceW"))
                 )
-                logger.info("Attendance table found")
+                # Scroll to attendance section
+                driver.execute_script("arguments[0].scrollIntoView(true);", attendance_section)
+                await asyncio.sleep(2)  # Wait for any animations to complete
             except Exception as e:
-                logger.error("Could not find attendance table")
-                raise
-            
-            # After finding attendance table, handle screenshot properly
-            logger.info("Preparing to take screenshot")
-            
-            # Scroll to top first
-            driver.execute_script("window.scrollTo(0, 0);")
-            await asyncio.sleep(1)
-            
-            # Find the attendance div container
-            attendance_div = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "attendanceW"))
-            )
-            
-            # Scroll the attendance div into view
-            driver.execute_script("arguments[0].scrollIntoView(true);", attendance_div)
-            await asyncio.sleep(1)
-            
-            # Scroll up slightly to show the full table (accounting for any fixed headers)
-            driver.execute_script("window.scrollBy(0, -100);")
-            await asyncio.sleep(1)
-            
-            # Get the table dimensions
-            table = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ctl03_grdTHERORY"))
-            )
-            location = table.location
-            size = table.size
-            
-            # Take full page screenshot
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            screenshot_path = os.path.abspath(f"attendance_{user_id}_{timestamp}.png")
-            logger.info(f"Taking screenshot: {screenshot_path}")
-            
-            # Set window size to ensure all content is visible
-            total_height = driver.execute_script("return document.body.scrollHeight")
-            driver.set_window_size(1920, total_height)
-            await asyncio.sleep(1)
-            
-            # Take the screenshot
-            driver.save_screenshot(screenshot_path)
-            logger.info("Screenshot saved successfully")
-            
-            # Verify the screenshot exists and has content
-            if not os.path.exists(screenshot_path):
-                raise Exception("Screenshot file was not created")
-            
-            if os.path.getsize(screenshot_path) == 0:
-                raise Exception("Screenshot file is empty")
-            
-            # Read the screenshot
-            with open(screenshot_path, "rb") as f:
-                screenshot_data = f.read()
-            
-            logger.info(f"Screenshot size: {len(screenshot_data)} bytes")
-            
-            # Clean up
-            os.remove(screenshot_path)
-            logger.info("Screenshot cleanup completed")
-            
-            return screenshot_data
+                logger.error("Could not find attendance section")
+                raise Exception("Failed to load attendance page")
+
+            # Get Theory attendance
+            logger.info("Extracting Theory attendance")
+            theory_data = extract_table_data("ctl00_ContentPlaceHolder1_ctl03_grdTHERORY", "Theory")
+            if theory_data:
+                all_attendance_data["Theory"] = theory_data
+
+            # Click Practical radio button and get Practical attendance
+            logger.info("Extracting Practical attendance")
+            try:
+                practical_radio = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and following-sibling::text()='Practical']"))
+                )
+                driver.execute_script("arguments[0].click();", practical_radio)
+                await asyncio.sleep(2)  # Wait for table to update
+                practical_data = extract_table_data("ctl00_ContentPlaceHolder1_ctl03_grdpract", "Practical")
+                if practical_data:
+                    all_attendance_data["Practical"] = practical_data
+            except Exception as e:
+                logger.error(f"Error getting practical attendance: {str(e)}")
+
+            # Click Tutorial radio button and get Tutorial attendance
+            logger.info("Extracting Tutorial attendance")
+            try:
+                tutorial_radio = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and following-sibling::text()='Tutorial']"))
+                )
+                driver.execute_script("arguments[0].click();", tutorial_radio)
+                await asyncio.sleep(2)  # Wait for table to update
+                tutorial_data = extract_table_data("ctl00_ContentPlaceHolder1_ctl03_grdtut", "Tutorial")
+                if tutorial_data:
+                    all_attendance_data["Tutorial"] = tutorial_data
+            except Exception as e:
+                logger.error(f"Error getting tutorial attendance: {str(e)}")
+
+            # Verify we have some valid data
+            if not any(all_attendance_data.values()):
+                raise Exception("No attendance data could be retrieved")
+
+            return all_attendance_data
             
         except Exception as e:
             logger.error(f"Error during attendance check: {str(e)}")
-            if driver:
-                try:
-                    error_path = os.path.abspath(f"error_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-                    driver.save_screenshot(error_path)
-                    logger.info(f"Error screenshot saved as {error_path}")
-                except Exception as screenshot_error:
-                    logger.error(f"Failed to take error screenshot: {str(screenshot_error)}")
             raise
             
         finally:
